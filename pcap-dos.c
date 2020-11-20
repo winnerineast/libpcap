@@ -943,7 +943,7 @@ static void pcap_init_hook (void)
 }
 
 /*
- * Supress PRINT message from Watt-32's sock_init()
+ * Suppress PRINT message from Watt-32's sock_init()
  */
 static void null_print (void) {}
 
@@ -1031,11 +1031,9 @@ static int init_watt32 (struct pcap *pcap, const char *dev_name, char *err_buf)
   pcap_save.linktype       = _eth_get_hwtype (NULL, NULL);
   pcap_save.snapshot       = MTU > 0 ? MTU : ETH_MAX; /* assume 1514 */
 
-#if 1
   /* prevent use of resolve() and resolve_ip()
    */
   last_nameserver = 0;
-#endif
   return (1);
 }
 

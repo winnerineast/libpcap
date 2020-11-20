@@ -117,6 +117,15 @@
 # define HAVE_TPACKET3
 #endif /* TPACKET3_HDRLEN */
 
+#define packet_mmap_acquire(pkt) \
+	(__atomic_load_n(&pkt->tp_status, __ATOMIC_ACQUIRE) != TP_STATUS_KERNEL)
+#define packet_mmap_release(pkt) \
+	(__atomic_store_n(&pkt->tp_status, TP_STATUS_KERNEL, __ATOMIC_RELEASE))
+#define packet_mmap_v3_acquire(pkt) \
+	(__atomic_load_n(&pkt->hdr.bh1.block_status, __ATOMIC_ACQUIRE) != TP_STATUS_KERNEL)
+#define packet_mmap_v3_release(pkt) \
+	(__atomic_store_n(&pkt->hdr.bh1.block_status, TP_STATUS_KERNEL, __ATOMIC_RELEASE))
+
 #include <linux/types.h>
 #include <linux/filter.h>
 
@@ -344,7 +353,6 @@ pcap_create_interface(const char *device, char *ebuf)
 	 * microsecond or nanosecond time stamps on arbitrary
 	 * adapters?
 	 */
-	handle->tstamp_precision_count = 2;
 	handle->tstamp_precision_list = malloc(2 * sizeof(u_int));
 	if (handle->tstamp_precision_list == NULL) {
 		pcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,
@@ -354,6 +362,7 @@ pcap_create_interface(const char *device, char *ebuf)
 	}
 	handle->tstamp_precision_list[0] = PCAP_TSTAMP_PRECISION_MICRO;
 	handle->tstamp_precision_list[1] = PCAP_TSTAMP_PRECISION_NANO;
+	handle->tstamp_precision_count = 2;
 
 	struct pcap_linux *handlep = handle->priv;
 	handlep->poll_breakloop_fd = eventfd(0, EFD_NONBLOCK);
@@ -1386,7 +1395,7 @@ get_if_ioctl_socket(void)
 	 *
 	 * There isn't a socket type that's guaranteed to work.
 	 *
-	 * AF_NETLINK will work *if* you have Netlink configured into th
+	 * AF_NETLINK will work *if* you have Netlink configured into the
 	 * kernel (can it be configured out if you have any networking
 	 * support at all?) *and* if you're running a sufficiently recent
 	 * kernel, but not all the kernels we support are sufficiently
@@ -1395,7 +1404,7 @@ get_if_ioctl_socket(void)
 	 * AF_UNIX will work *if* you have UNIX-domain sockets configured
 	 * into the kernel and *if* you're not on a system that doesn't
 	 * allow them - some SELinux systems don't allow you create them.
-	 * Most systems probably have them configured in, but all systems
+	 * Most systems probably have them configured in, but not all systems
 	 * have them configured in and allow them to be created.
 	 *
 	 * AF_INET will work *if* you have IPv4 configured into the kernel,
@@ -1404,7 +1413,7 @@ get_if_ioctl_socket(void)
 	 *
 	 * AF_INET6 will work *if* you have IPv6 configured into the
 	 * kernel, but if you don't have AF_INET, you might not have
-	 * AF_INET6, either.
+	 * AF_INET6, either (that is, independently on its own grounds).
 	 *
 	 * AF_PACKET would work, except that some of these calls should
 	 * work even if you *don't* have capture permission (you should be
@@ -1430,6 +1439,8 @@ get_if_ioctl_socket(void)
 	 * if that fails, we try an AF_UNIX socket, as that's less
 	 * likely to be configured out on a networking-capable system
 	 * than is IP;
+	 *
+	 * if that fails, we try an AF_INET6 socket;
 	 *
 	 * if that fails, we try an AF_INET socket.
 	 */
@@ -1469,6 +1480,14 @@ get_if_ioctl_socket(void)
 		/*
 		 * OK, we got it!
 		 */
+		return (fd);
+	}
+
+	/*
+	 * Now try an AF_INET6 socket.
+	 */
+	fd = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (fd != -1) {
 		return (fd);
 	}
 
@@ -2520,7 +2539,7 @@ activate_pf_packet(pcap_t *handle, int is_any_device)
 		}
 	}
 
-	/* Enable auxillary data if supported and reserve room for
+	/* Enable auxiliary data if supported and reserve room for
 	 * reconstructing VLAN headers. */
 #ifdef HAVE_PACKET_AUXDATA
 	val = 1;
@@ -3037,7 +3056,7 @@ create_ring(pcap_t *handle, int *status)
 		return -1;
 	}
 
-	/* compute the minumum block size that will handle this frame.
+	/* compute the minimum block size that will handle this frame.
 	 * The block has to be page size aligned.
 	 * The max block size allowed by the kernel is arch-dependent and
 	 * it's not explicitly checked here. */
@@ -3368,11 +3387,11 @@ pcap_get_ring_frame_status(pcap_t *handle, int offset)
 	h.raw = RING_GET_FRAME_AT(handle, offset);
 	switch (handlep->tp_version) {
 	case TPACKET_V2:
-		return (h.h2->tp_status);
+		return __atomic_load_n(&h.h2->tp_status, __ATOMIC_ACQUIRE);
 		break;
 #ifdef HAVE_TPACKET3
 	case TPACKET_V3:
-		return (h.h3->hdr.bh1.block_status);
+		return __atomic_load_n(&h.h3->hdr.bh1.block_status, __ATOMIC_ACQUIRE);
 		break;
 #endif
 	}
@@ -3959,7 +3978,7 @@ pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 
 	/* wait for frames availability.*/
 	h.raw = RING_GET_CURRENT_FRAME(handle);
-	if (h.h2->tp_status == TP_STATUS_KERNEL) {
+	if (!packet_mmap_acquire(h.h2)) {
 		/*
 		 * The current frame is owned by the kernel; wait for
 		 * a frame to be handed to us.
@@ -3978,7 +3997,7 @@ pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 		 * it's still owned by the kernel.
 		 */
 		h.raw = RING_GET_CURRENT_FRAME(handle);
-		if (h.h2->tp_status == TP_STATUS_KERNEL)
+		if (!packet_mmap_acquire(h.h2))
 			break;
 
 		ret = pcap_handle_packet_mmap(
@@ -4006,7 +4025,7 @@ pcap_read_linux_mmap_v2(pcap_t *handle, int max_packets, pcap_handler callback,
 		 * after having been filtered by the kernel, count
 		 * the one we've just processed.
 		 */
-		h.h2->tp_status = TP_STATUS_KERNEL;
+		packet_mmap_release(h.h2);
 		if (handlep->blocks_to_filter_in_userland > 0) {
 			handlep->blocks_to_filter_in_userland--;
 			if (handlep->blocks_to_filter_in_userland == 0) {
@@ -4045,7 +4064,7 @@ again:
 	if (handlep->current_packet == NULL) {
 		/* wait for frames availability.*/
 		h.raw = RING_GET_CURRENT_FRAME(handle);
-		if (h.h3->hdr.bh1.block_status == TP_STATUS_KERNEL) {
+		if (!packet_mmap_v3_acquire(h.h3)) {
 			/*
 			 * The current frame is owned by the kernel; wait
 			 * for a frame to be handed to us.
@@ -4057,7 +4076,7 @@ again:
 		}
 	}
 	h.raw = RING_GET_CURRENT_FRAME(handle);
-	if (h.h3->hdr.bh1.block_status == TP_STATUS_KERNEL) {
+	if (!packet_mmap_v3_acquire(h.h3)) {
 		if (pkts == 0 && handlep->timeout == 0) {
 			/* Block until we see a packet. */
 			goto again;
@@ -4072,7 +4091,7 @@ again:
 
 		if (handlep->current_packet == NULL) {
 			h.raw = RING_GET_CURRENT_FRAME(handle);
-			if (h.h3->hdr.bh1.block_status == TP_STATUS_KERNEL)
+			if (!packet_mmap_v3_acquire(h.h3))
 				break;
 
 			handlep->current_packet = h.raw + h.h3->hdr.bh1.offset_to_first_pkt;
@@ -4124,7 +4143,7 @@ again:
 			 * filtered by the kernel, count the one we've
 			 * just processed.
 			 */
-			h.h3->hdr.bh1.block_status = TP_STATUS_KERNEL;
+			packet_mmap_v3_release(h.h3);
 			if (handlep->blocks_to_filter_in_userland > 0) {
 				handlep->blocks_to_filter_in_userland--;
 				if (handlep->blocks_to_filter_in_userland == 0) {
@@ -4278,7 +4297,7 @@ pcap_setfilter_linux(pcap_t *handle, struct bpf_program *filter)
 		if ((err = set_kernel_filter(handle, &fcode)) == 0)
 		{
 			/*
-			 * Installation succeded - using kernel filter,
+			 * Installation succeeded - using kernel filter,
 			 * so userland filtering not needed.
 			 */
 			handlep->filter_in_userland = 0;
@@ -4632,15 +4651,21 @@ static const struct {
 /*
  * Set the list of time stamping types to include all types.
  */
-static void
-iface_set_all_ts_types(pcap_t *handle)
+static int
+iface_set_all_ts_types(pcap_t *handle, char *ebuf)
 {
 	u_int i;
 
-	handle->tstamp_type_count = NUM_SOF_TIMESTAMPING_TYPES;
 	handle->tstamp_type_list = malloc(NUM_SOF_TIMESTAMPING_TYPES * sizeof(u_int));
+	if (handle->tstamp_type_list == NULL) {
+		pcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,
+		    errno, "malloc");
+		return -1;
+	}
 	for (i = 0; i < NUM_SOF_TIMESTAMPING_TYPES; i++)
 		handle->tstamp_type_list[i] = sof_ts_type_map[i].pcap_tstamp_val;
+	handle->tstamp_type_count = NUM_SOF_TIMESTAMPING_TYPES;
+	return 0;
 }
 
 #ifdef ETHTOOL_GET_TS_INFO
@@ -4696,7 +4721,8 @@ iface_ethtool_get_ts_info(const char *device, pcap_t *handle, char *ebuf)
 			 * asking for the time stamping types, so let's
 			 * just return all the possible types.
 			 */
-			iface_set_all_ts_types(handle);
+			if (iface_set_all_ts_types(handle, ebuf) == -1)
+				return -1;
 			return 0;
 
 		case ENODEV:
@@ -4744,15 +4770,20 @@ iface_ethtool_get_ts_info(const char *device, pcap_t *handle, char *ebuf)
 		if (info.so_timestamping & sof_ts_type_map[i].soft_timestamping_val)
 			num_ts_types++;
 	}
-	handle->tstamp_type_count = num_ts_types;
 	if (num_ts_types != 0) {
 		handle->tstamp_type_list = malloc(num_ts_types * sizeof(u_int));
+		if (handle->tstamp_type_list == NULL) {
+			pcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,
+			    errno, "malloc");
+			return -1;
+		}
 		for (i = 0, j = 0; i < NUM_SOF_TIMESTAMPING_TYPES; i++) {
 			if (info.so_timestamping & sof_ts_type_map[i].soft_timestamping_val) {
 				handle->tstamp_type_list[j] = sof_ts_type_map[i].pcap_tstamp_val;
 				j++;
 			}
 		}
+		handle->tstamp_type_count = num_ts_types;
 	} else
 		handle->tstamp_type_list = NULL;
 
@@ -4760,7 +4791,7 @@ iface_ethtool_get_ts_info(const char *device, pcap_t *handle, char *ebuf)
 }
 #else /* ETHTOOL_GET_TS_INFO */
 static int
-iface_ethtool_get_ts_info(const char *device, pcap_t *handle, char *ebuf _U_)
+iface_ethtool_get_ts_info(const char *device, pcap_t *handle, char *ebuf)
 {
 	/*
 	 * This doesn't apply to the "any" device; you can't say "turn on
@@ -4778,7 +4809,8 @@ iface_ethtool_get_ts_info(const char *device, pcap_t *handle, char *ebuf _U_)
 	 * We don't have an ioctl to use to ask what's supported,
 	 * so say we support everything.
 	 */
-	iface_set_all_ts_types(handle);
+	if (iface_set_all_ts_types(handle, ebuf) == -1)
+		return -1;
 	return 0;
 }
 #endif /* ETHTOOL_GET_TS_INFO */

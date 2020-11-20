@@ -333,7 +333,7 @@ dag_erf_ext_header_count(uint8_t * erf, size_t len)
 /*
  *  Read at most max_packets from the capture stream and call the callback
  *  for each of them. Returns the number of packets handled, -1 if an
- *  error occured, or -2 if we were told to break out of the loop.
+ *  error occurred, or -2 if we were told to break out of the loop.
  */
 static int
 dag_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)
@@ -1084,7 +1084,6 @@ pcap_t *dag_create(const char *device, char *ebuf, int *is_ours)
 	 * XXX Our native precision is 2^-32s, but libpcap doesn't support
 	 * power of two precisions yet. We can convert to either MICRO or NANO.
 	 */
-	p->tstamp_precision_count = 2;
 	p->tstamp_precision_list = malloc(2 * sizeof(u_int));
 	if (p->tstamp_precision_list == NULL) {
 		pcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,
@@ -1094,6 +1093,7 @@ pcap_t *dag_create(const char *device, char *ebuf, int *is_ours)
 	}
 	p->tstamp_precision_list[0] = PCAP_TSTAMP_PRECISION_MICRO;
 	p->tstamp_precision_list[1] = PCAP_TSTAMP_PRECISION_NANO;
+	p->tstamp_precision_count = 2;
 	return p;
 }
 
